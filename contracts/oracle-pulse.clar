@@ -178,3 +178,136 @@
     (ok true)
   )
 )
+
+;; Claims proportional winnings from resolved market
+;; @param market-id: Resolved market to claim from
+;; @returns: Payout amount in microSTX
+(define-public (claim-winnings (market-id uint))
+  (let (
+      (market (unwrap! (map-get? markets market-id) ERR-NOT-FOUND))
+      (prediction (unwrap!
+        (map-get? user-predictions {
+          market-id: market-id,
+          user: tx-sender,
+        })
+        ERR-NOT-FOUND
+      ))
+    )
+    (asserts! (get resolved market) ERR-MARKET-CLOSED)
+    (asserts! (not (get claimed prediction)) ERR-ALREADY-CLAIMED)
+
+    (let (
+        (winning-prediction (if (> (get end-price market) (get start-price market))
+          "up"
+          "down"
+        ))
+        (total-stake (+ (get total-up-stake market) (get total-down-stake market)))
+        (winning-stake (if (is-eq winning-prediction "up")
+          (get total-up-stake market)
+          (get total-down-stake market)
+        ))
+      )
+      (asserts! (is-eq (get prediction prediction) winning-prediction)
+        ERR-INVALID-PREDICTION
+      )
+
+      (let (
+          (winnings (/ (* (get stake prediction) total-stake) winning-stake))
+          (fee (/ (* winnings (var-get fee-percentage)) u100))
+          (payout (- winnings fee))
+        )
+        ;; Transfer winnings to user
+        (try! (as-contract (stx-transfer? payout (as-contract tx-sender) tx-sender)))
+        ;; Transfer protocol fee to owner
+        (try! (as-contract (stx-transfer? fee (as-contract tx-sender) CONTRACT-OWNER)))
+
+        ;; Mark as claimed
+        (map-set user-predictions {
+          market-id: market-id,
+          user: tx-sender,
+        }
+          (merge prediction { claimed: true })
+        )
+        (ok payout)
+      )
+    )
+  )
+)
+
+;; READ-ONLY FUNCTIONS - DATA ACCESS
+
+;; Retrieves complete market information
+;; @param market-id: Market identifier
+;; @returns: Market data or none
+(define-read-only (get-market (market-id uint))
+  (map-get? markets market-id)
+)
+
+;; Retrieves user's prediction details for specific market
+;; @param market-id: Market identifier
+;; @param user: User's principal address
+;; @returns: Prediction data or none
+(define-read-only (get-user-prediction
+    (market-id uint)
+    (user principal)
+  )
+  (map-get? user-predictions {
+    market-id: market-id,
+    user: user,
+  })
+)
+
+;; Returns current protocol treasury balance
+;; @returns: Contract balance in microSTX
+(define-read-only (get-contract-balance)
+  (stx-get-balance (as-contract tx-sender))
+)
+
+;; ADMINISTRATIVE FUNCTIONS - GOVERNANCE
+
+;; Updates authorized oracle address for price feeds
+;; @param new-address: New oracle principal
+;; @returns: Success boolean
+(define-public (set-oracle-address (new-address principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (asserts! (is-eq new-address new-address) ERR-INVALID-PARAMETER)
+    (ok (var-set oracle-address new-address))
+  )
+)
+
+;; Updates minimum stake requirement for predictions
+;; @param new-minimum: New minimum stake in microSTX
+;; @returns: Success boolean
+(define-public (set-minimum-stake (new-minimum uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (asserts! (> new-minimum u0) ERR-INVALID-PARAMETER)
+    (ok (var-set minimum-stake new-minimum))
+  )
+)
+
+;; Updates protocol fee percentage (max 100%)
+;; @param new-fee: New fee percentage (0-100)
+;; @returns: Success boolean
+(define-public (set-fee-percentage (new-fee uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (asserts! (<= new-fee u100) ERR-INVALID-PARAMETER)
+    (ok (var-set fee-percentage new-fee))
+  )
+)
+
+;; Withdraws accumulated protocol fees to owner
+;; @param amount: Amount to withdraw in microSTX
+;; @returns: Withdrawn amount
+(define-public (withdraw-fees (amount uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (asserts! (<= amount (stx-get-balance (as-contract tx-sender)))
+      ERR-INSUFFICIENT-BALANCE
+    )
+    (try! (as-contract (stx-transfer? amount (as-contract tx-sender) CONTRACT-OWNER)))
+    (ok amount)
+  )
+)
